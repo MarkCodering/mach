@@ -1,0 +1,83 @@
+{
+  "name": "machjs",
+  "version": "0.1.0",
+  "description": "The fast, lightweight, AI-native web framework. Web Standards, zero dependencies, streaming, tools, agents and MCP built in.",
+  "license": "MIT",
+  "author": "Mark Chen",
+  "type": "module",
+  "sideEffects": false,
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/MarkCodering/mach.git"
+  },
+  "keywords": ["web", "framework", "ai", "llm", "agent", "mcp", "sse", "streaming", "web-standards", "bun", "deno", "cloudflare", "edge"],
+  "engines": {
+    "node": ">=20"
+  },
+  "files": ["dist", "README.md", "LICENSE"],
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./schema": {
+      "types": "./dist/schema/index.d.ts",
+      "import": "./dist/schema/index.js"
+    },
+    "./sse": {
+      "types": "./dist/stream/sse.d.ts",
+      "import": "./dist/stream/sse.js"
+    },
+    "./middleware": {
+      "types": "./dist/middleware/index.d.ts",
+      "import": "./dist/middleware/index.js"
+    },
+    "./ai": {
+      "types": "./dist/ai/index.d.ts",
+      "import": "./dist/ai/index.js"
+    },
+    "./ai/anthropic": {
+      "types": "./dist/ai/providers/anthropic.d.ts",
+      "import": "./dist/ai/providers/anthropic.js"
+    },
+    "./ai/openai": {
+      "types": "./dist/ai/providers/openai.d.ts",
+      "import": "./dist/ai/providers/openai.js"
+    },
+    "./ai/mock": {
+      "types": "./dist/ai/providers/mock.d.ts",
+      "import": "./dist/ai/providers/mock.js"
+    },
+    "./mcp": {
+      "types": "./dist/mcp/server.d.ts",
+      "import": "./dist/mcp/server.js"
+    },
+    "./client": {
+      "types": "./dist/client.d.ts",
+      "import": "./dist/client.js"
+    },
+    "./node": {
+      "types": "./dist/adapters/node.d.ts",
+      "import": "./dist/adapters/node.js"
+    }
+  },
+  "scripts": {
+    "test": "bun test",
+    "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.test.json",
+    "build": "rm -rf dist && tsc -p tsconfig.build.json",
+    "bench": "bun bench/router.bench.ts && bun bench/request.bench.ts",
+    "bench:node": "npm run build && node --experimental-strip-types --no-warnings bench/request.bench.ts",
+    "example:basic": "bun examples/basic/index.ts",
+    "example:chat": "bun examples/chat-agent/index.ts"
+  },
+  "devDependencies": {
+    "@types/bun": "1.4.4",
+    "@types/node": "22.19.1",
+    "find-my-way": "9.10.0",
+    "hono": "4.13.18",
+    "mitata": "1.0.34",
+    "typescript": "5.9.3"
+  }
+}

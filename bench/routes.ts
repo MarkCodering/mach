@@ -1,0 +1,35 @@
+/** A realistic route table (REST API + AI endpoints) shared by the benchmarks. */
+export const routes: [method: string, path: string][] = [
+  ['GET', '/'],
+  ['GET', '/health'],
+  ['GET', '/user'],
+  ['GET', '/user/comments'],
+  ['GET', '/user/avatar'],
+  ['GET', '/user/lookup/username/:username'],
+  ['GET', '/user/lookup/email/:address'],
+  ['GET', '/event/:id'],
+  ['GET', '/event/:id/comments'],
+  ['POST', '/event/:id/comment'],
+  ['GET', '/map/:location/events'],
+  ['GET', '/status'],
+  ['GET', '/very/deeply/nested/route/hello/there'],
+  ['GET', '/static/*'],
+  ['POST', '/chat'],
+  ['POST', '/v1/chat/completions'],
+  ['GET', '/v1/models'],
+  ['GET', '/v1/models/:model'],
+  ['POST', '/v1/threads/:threadId/runs'],
+  ['GET', '/v1/threads/:threadId/runs/:runId'],
+  ['POST', '/mcp'],
+]
+
+export const requests: { name: string; method: string; path: string }[] = [
+  { name: 'short static', method: 'GET', path: '/user' },
+  { name: 'static with same radix', method: 'GET', path: '/user/comments' },
+  { name: 'dynamic route', method: 'GET', path: '/user/lookup/username/hey' },
+  { name: 'mixed static dynamic', method: 'GET', path: '/event/abcd1234/comments' },
+  { name: 'post', method: 'POST', path: '/event/abcd1234/comment' },
+  { name: 'long static', method: 'GET', path: '/very/deeply/nested/route/hello/there' },
+  { name: 'wildcard', method: 'GET', path: '/static/index.html' },
+  { name: 'ai: two params', method: 'GET', path: '/v1/threads/thread_abc/runs/run_123' },
+]
