@@ -104,7 +104,61 @@ export function buildRequestBody(modelId: string, options: AnthropicOptions, req
   const fallbacks = options.fallbacks ?? (FALLBACK_MODELS.has(modelId) ? 'default' : false)
   if (fallbacks) body.fallbacks = fallbacks
   if (request.providerOptions) Object.assign(body, request.providerOptions)
+  if (request.responseFormat) {
+    // Merge so a caller's output_config (e.g. effort) is kept alongside the format.
+    body.output_config = {
+      ...(body.output_config as object | undefined),
+      format: { type: 'json_schema', schema: toClaudeSchema(request.responseFormat.schema) },
+    }
+  }
   return body
+}
+
+const UNSUPPORTED_KEYWORDS = new Set([
+  'minimum',
+  'maximum',
+  'exclusiveMinimum',
+  'exclusiveMaximum',
+  'multipleOf',
+  'minLength',
+  'maxLength',
+  'minItems',
+  'maxItems',
+  'uniqueItems',
+  'pattern',
+  'default',
+  '$schema',
+])
+
+/**
+ * Adapt a JSON Schema to Claude structured outputs: drop keywords it does not support
+ * (they are still enforced client-side by `generateObject`), require
+ * `additionalProperties: false` on objects, and express nullable types with `anyOf`.
+ * @internal exported for tests
+ */
+export function toClaudeSchema(schema: unknown): unknown {
+  if (Array.isArray(schema)) return schema.map(toClaudeSchema)
+  if (!schema || typeof schema !== 'object') return schema
+  const out: Record<string, unknown> = {}
+  for (const [key, value] of Object.entries(schema)) {
+    if (UNSUPPORTED_KEYWORDS.has(key)) continue
+    if (key === 'properties' && value && typeof value === 'object') {
+      out.properties = Object.fromEntries(Object.entries(value).map(([k, v]) => [k, toClaudeSchema(v)]))
+    } else if (key === 'additionalProperties' && value !== false) {
+      throw new TypeError(
+        'Claude structured outputs require `additionalProperties: false`; record/map schemas are not supported. ' +
+          'Use an array of { key, value } objects instead.',
+      )
+    } else {
+      out[key] = toClaudeSchema(value)
+    }
+  }
+  if (out.type === 'object' && out.additionalProperties === undefined) out.additionalProperties = false
+  if (Array.isArray(out.type)) {
+    const { type, ...rest } = out
+    return { anyOf: (type as string[]).map((t) => (t === 'null' ? { type: 'null' } : { ...rest, type: t })) }
+  }
+  return out
 }
 
 type Block = Record<string, unknown>

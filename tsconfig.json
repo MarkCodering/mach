@@ -45,13 +45,19 @@
         "./src/ai/providers/mock.ts"
       ],
       "machjs/mcp": [
-        "./src/mcp/server.ts"
+        "./src/mcp/index.ts"
       ],
       "machjs/client": [
         "./src/client.ts"
       ],
       "machjs/node": [
         "./src/adapters/node.ts"
+      ],
+      "machjs/openapi": [
+        "./src/openapi.ts"
+      ],
+      "machjs/react": [
+        "./src/react.ts"
       ]
     }
   },

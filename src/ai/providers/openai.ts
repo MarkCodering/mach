@@ -59,6 +59,12 @@ export function buildOpenAIBody(modelId: string, options: OpenAIOptions, request
     }))
     if (request.toolChoice) body.tool_choice = request.toolChoice
   }
+  if (request.responseFormat) {
+    body.response_format = {
+      type: 'json_schema',
+      json_schema: { name: request.responseFormat.name ?? 'response', schema: request.responseFormat.schema, strict: false },
+    }
+  }
   if (request.providerOptions) Object.assign(body, request.providerOptions)
   return body
 }

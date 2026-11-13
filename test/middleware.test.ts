@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import { Mach } from '../src/index.ts'
-import { bodyLimit, cors, logger, requestId, timing } from '../src/middleware/index.ts'
+import { bodyLimit, cors, logger, memoryStore, rateLimit, requestId, timing } from '../src/middleware/index.ts'
 
 describe('cors', () => {
   test('preflight for unmatched routes and decorated responses', async () => {
@@ -86,5 +86,55 @@ describe('bodyLimit', () => {
     expect((await app.fetch(big)).status).toBe(413)
     const small = new Request('http://localhost/', { method: 'POST', body: chunked(2), duplex: 'half' } as RequestInit)
     expect(await (await app.fetch(small)).json()).toBe(8)
+  })
+})
+
+describe('rateLimit', () => {
+  test('limits per key with standard headers and Retry-After', async () => {
+    let t = 1_000_000
+    const app = new Mach()
+      .use(rateLimit({ limit: 2, windowMs: 10_000, key: (c) => c.req.headers.get('x-api-key'), now: () => t }))
+      .get('/', () => 'ok')
+    const call = (key?: string) => app.request('/', { headers: key ? { 'x-api-key': key } : {} })
+
+    let r = await call('a')
+    expect(r.status).toBe(200)
+    expect(r.headers.get('ratelimit-limit')).toBe('2')
+    expect(r.headers.get('ratelimit-remaining')).toBe('1')
+    expect(r.headers.get('ratelimit-reset')).toBe('10')
+    expect((await call('a')).status).toBe(200)
+    r = await call('a')
+    expect(r.status).toBe(429)
+    expect(r.headers.get('retry-after')).toBe('10')
+    expect(r.headers.get('ratelimit-remaining')).toBe('0')
+    expect(await r.json()).toEqual({ error: 'Too Many Requests' })
+
+    expect((await call('b')).status).toBe(200) // separate key
+    expect((await call()).headers.get('ratelimit-limit')).toBeNull() // no key: not limited
+
+    t += 10_000 // window rolls over
+    expect((await call('a')).status).toBe(200)
+  })
+
+  test('cost weights requests', async () => {
+    const app = new Mach()
+      .use(rateLimit({ limit: 10, windowMs: 60_000, key: () => 'k', cost: (c) => (c.req.method === 'POST' ? 6 : 1) }))
+      .post('/chat', () => 'ok')
+    expect((await app.request('/chat', { method: 'POST' })).status).toBe(200)
+    expect((await app.request('/chat', { method: 'POST' })).status).toBe(429)
+  })
+
+  test('memory store sweeps expired windows', () => {
+    let t = 0
+    const store = memoryStore({ now: () => t })
+    for (let i = 0; i < 999; i++) store.hit(`k${i}`, 1, 10)
+    expect(store.size()).toBe(999)
+    t = 100
+    store.hit('fresh', 1, 10) // 1000th hit triggers a sweep
+    expect(store.size()).toBe(1)
+  })
+
+  test('validates options', () => {
+    expect(() => rateLimit({ limit: 0, windowMs: 1, key: () => 'x' })).toThrow(RangeError)
   })
 })

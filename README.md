@@ -26,16 +26,19 @@ export default app // Bun, Deno, Cloudflare Workers. Node: serve(app) from 'mach
 ## Why Mach
 
 - **Fast.** A RegExp-compiled router and a near-allocation-free hot path. In-process it runs 1.1–2× faster than Hono on Bun and Node ([benchmarks](#benchmarks)).
-- **Light.** Zero runtime dependencies. A minimal app bundles to **~5.9 KB gzipped**. An app using the agent, tools, the Anthropic adapter and MCP comes to ~14 KB.
+- **Light.** Zero runtime dependencies. A minimal app bundles to **~6.3 KB gzipped**. An app using the agent, tools, the Anthropic adapter and MCP comes to ~15.5 KB.
 - **Web Standards.** `Request` in, `Response` out. Runs on Bun, Node, Deno, Cloudflare Workers, Vercel and other edge runtimes. No `eval`.
 - **AI-native.**
   - First-class SSE with backpressure and client-disconnect aborts.
   - Provider-neutral models: Claude, any OpenAI-compatible server, or a scripted mock.
-  - Typed tools and a parallel tool-calling agent loop.
-  - One tool definition serves the agent, your routes and MCP clients.
+  - Typed tools and a parallel tool-calling agent loop with token budgets and usage hooks.
+  - Schema-validated structured output (`generateObject`).
+  - One tool definition serves the agent, your routes and MCP clients, and `mcpClient()` brings remote MCP tools in.
+  - `useChat` for React, plus a framework-agnostic chat store.
 - **Developer friendly.**
   - Return anything (string, object, stream, async generator).
   - Params are typed from the path, and inputs are validated and typed from schemas.
+  - Those same schemas generate an OpenAPI 3.1 document.
   - `app.request()` for tests and clear error messages.
   - A mock model so everything runs offline with no API key.
 - **Secure by default.**
@@ -129,6 +132,21 @@ app.use('/admin/*', async (c, next) => {
 })
 ```
 
+**Rate limiting** works per key, with an optional per-request cost so expensive AI endpoints can count for more:
+
+```ts
+import { rateLimit } from 'machjs/middleware'
+
+app.use('/chat', rateLimit({
+  limit: 60, windowMs: 60_000,
+  key: (c) => c.req.headers.get('x-api-key'),            // you choose the identity; IP headers are spoofable
+  cost: (c) => (c.req.method === 'POST' ? 5 : 1),
+  // store: a Redis/KV implementation of RateLimitStore when running several instances
+}))
+```
+
+It sends `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset` on every response, and a `429` with `Retry-After` when a key is over its limit.
+
 Returning nothing without calling `next()` simply passes through, so guard-style middleware is a one-liner. Thrown errors become responses where they are thrown, so outer middleware such as CORS still decorates error responses. Typed per-request state comes from `new Mach<{ Variables: { user: User } }>()` together with `c.set()`, `c.get()` and `c.var`.
 
 ### Errors
@@ -147,6 +165,24 @@ Unknown errors are logged and returned as a generic 500. Stack traces and messag
 const res = await app.request('/todos', { json: { title: 'x' } })   // POST with a JSON body
 expect(res.status).toBe(201)
 ```
+
+### OpenAPI
+
+Route schemas double as API documentation. `openapi()` builds an OpenAPI 3.1 document from them, including path, query and header parameters, request bodies, responses and validation errors:
+
+```ts
+import { openapi } from 'machjs/openapi'
+
+app.get('/todos/:id', {
+  params: s.object({ id: s.string({ format: 'uuid' }) }),
+  response: Todo,                                         // documents the 200 JSON body
+  docs: { summary: 'Get a todo', tags: ['todos'] },       // also: description, operationId, deprecated, hidden, responses
+}, handler)
+
+app.get('/openapi.json', { docs: { hidden: true } }, () => openapi(app, { info: { title: 'Todo API', version: '1.0.0' } }))
+```
+
+Agent endpoints are documented as `text/event-stream`, and MCP endpoints are left out.
 
 ## AI
 
@@ -177,6 +213,22 @@ import { generate } from 'machjs/ai'
 const { text, usage } = await generate(anthropic(), 'Summarize Web Standards in one line')
 ```
 
+### Structured output
+
+`generateObject()` returns a typed object validated against your schema:
+
+```ts
+import { generateObject } from 'machjs/ai'
+
+const { object } = await generateObject(anthropic(), {
+  schema: s.object({ name: s.string(), email: s.string({ format: 'email' }).nullable() }),
+  prompt: 'Extract the contact: "Met Ada Lovelace (ada@example.com) yesterday"',
+})
+object.email // string | null
+```
+
+It uses each provider's native structured output: Claude's `output_config.format`, with the schema adapted to what Claude supports, and OpenAI's `response_format`. Constraints the provider can't enforce, such as length limits, are still checked client-side. If the output doesn't parse or validate, it retries once (configurable with `maxRetries`) with the errors fed back to the model. Refusals and truncated output throw `ObjectGenerationError`.
+
 ### Tools
 
 ```ts
@@ -202,6 +254,9 @@ const assistant = agent({
   tools: [search, weather],
   maxSteps: 10,
   beforeToolCall: (call, ctx) => call.name !== 'delete_everything',   // approvals and policy
+  maxTotalTokens: 200_000,                                            // per-run token budget
+  onStepFinish: (step, ctx) => meter(ctx.user, step.usage),           // usage accounting
+  onFinish: (result, ctx) => saveConversation(ctx.user, result.messages),
   http: { context: (c) => ({ user: c.get('user') }) },                // per-request context for tools
 })
 
@@ -210,7 +265,11 @@ const result = await assistant.run('Weather in Paris?')  // or run it in-process
 for await (const ev of assistant.stream(messages)) { /* events */ }
 ```
 
-The loop calls the model and runs requested tools **in parallel**, streaming their results as they finish. It feeds the results back and repeats until the model answers. It stops at `maxSteps`, on truncation and on refusals, and it never runs tool calls from a truncated turn. Aborts, including client disconnects, cancel the model call and the tools.
+The loop calls the model and runs requested tools **in parallel**, streaming their results as they finish. It feeds the results back and repeats until the model answers.
+
+- It stops at `maxSteps`, at the `maxTotalTokens` budget (`finishReason: 'budget'`), on truncation and on refusals. It never runs tool calls from a truncated turn.
+- Aborts, including client disconnects, cancel the model call and the tools.
+- Incoming history is repaired before the model sees it. Tool calls that never got a result, for example because the user pressed Stop mid-tool, are dropped so providers accept the conversation.
 
 **SSE wire protocol.** Each event is sent as `event: <type>` followed by `data: <json>`:
 
@@ -226,7 +285,7 @@ The loop calls the model and runs requested tools **in parallel**, streaming the
 | `finish` | `{ text, finishReason, usage, steps }` |
 | `error` | `{ message }` (generic, with no internals) |
 
-### Client
+### Client and UI
 
 ```ts
 import { chat, streamChat } from 'machjs/client'
@@ -235,6 +294,26 @@ const { text, messages } = await chat('/chat', { messages, onText: (d) => render
 for await (const ev of streamChat('/chat', { messages })) { /* typed AgentEvent */ }
 ```
 
+`useChat` (React) keeps the conversation, the streaming draft and live tool status for you:
+
+```tsx
+import { useChat } from 'machjs/react'
+
+function Chat() {
+  const { messages, draft, tools, status, send, stop } = useChat({ api: '/chat' })
+  return (
+    <>
+      {messages.map((m, i) => <Message key={i} message={m} />)}
+      {draft && <p>{draft}</p>}
+      {tools.filter((t) => t.status === 'running').map((t) => <Spinner key={t.id} label={t.name} />)}
+      {status === 'streaming' ? <button onClick={stop}>Stop</button> : <Composer onSend={send} />}
+    </>
+  )
+}
+```
+
+The hook is a thin wrapper over `createChat()` from `machjs/client`. That is a framework-agnostic store (`getState`, `subscribe`, `send`, `stop`, `setMessages`) with immutable snapshots, so it also plugs into Vue, Svelte, Solid or plain JS. React is an optional peer dependency.
+
 ### MCP
 
 `mcpServer()` exposes tools to any MCP client (Claude, IDEs, other agents) over the Streamable HTTP transport. It supports protocol versions `2025-11-25`, `2025-06-18` and `2025-03-26`, handling `initialize`, `ping`, `tools/list` and `tools/call` and returning `structuredContent`. It is stateless, and it validates `Origin` against `allowedOrigins`.
@@ -242,6 +321,17 @@ for await (const ev of streamChat('/chat', { messages })) { /* typed AgentEvent 
 ```ts
 app.mcp('/mcp', mcpServer({ name: 'docs', version: '1.0.0', tools: [search], context: (c) => ({ user: c.get('user') }) }))
 ```
+
+`mcpClient()` goes the other way: it turns any remote MCP server's tools into Mach tools for your agents. It handles the initialize handshake, session IDs, JSON or SSE responses, and pagination:
+
+```ts
+import { mcpClient } from 'machjs/mcp'
+
+const github = mcpClient({ url: 'https://example.com/mcp', headers: { authorization: `Bearer ${token}` } })
+const assistant = agent({ model, tools: [...(await github.tools({ prefix: 'gh_' })), weather] })
+```
+
+Remote tool names are sanitised to what LLM providers accept (`[A-Za-z0-9_-]{1,64}`), and remote errors come back to the model as error results.
 
 ## Runtimes
 
@@ -260,9 +350,9 @@ These measure framework overhead in-process: `app.fetch(Request) → Response`, 
 
 | Benchmark | Bun 1.4.4 | Node 22.23 |
 | --- | --- | --- |
-| 8 requests, text response | **1.12×** faster than Hono | **1.11×** faster than Hono |
-| 8 requests + 1 middleware | **1.89×** faster than Hono | **1.69×** faster than Hono |
-| JSON response with a param | **2.04×** faster than Hono | **1.04×** faster than Hono |
+| 8 requests, text response | **1.13×** faster than Hono | **1.11×** faster than Hono |
+| 8 requests + 1 middleware | **1.98×** faster than Hono | **1.69×** faster than Hono |
+| JSON response with a param | **1.68×** faster than Hono | **1.04×** faster than Hono |
 
 Router lookup only (Bun):
 
@@ -275,7 +365,7 @@ Router lookup only (Bun):
 Caveats, honestly stated:
 - These are micro-benchmarks, and real apps are dominated by I/O and, for AI apps, by model latency.
 - Hono's RegExpRouter is still slightly ahead on raw lookups in the full mix.
-- Results vary by machine and runtime version.
+- Results vary by machine, runtime version and run (for example, JSON on Bun has measured 1.7–2.0×).
 
 Reproduce them with `bun run bench`, and `bun run bench:node` for Node.
 
@@ -283,7 +373,7 @@ Reproduce them with `bun run bench`, and `bun run bench:node` for Node.
 
 ```bash
 bun install
-bun test              # 90 tests: router, app, schema, SSE, middleware, agent, providers, MCP, Node adapter, types
+bun test              # 122 tests: core, schema, SSE, middleware, agent, structured output, providers, MCP server/client, OpenAPI, UI store, Node adapter, types
 bun run typecheck     # strict TypeScript, including type-level tests
 bun run build         # ESM + .d.ts into dist/
 bun run example:chat  # chat UI + agent + MCP at http://localhost:3000 (mock model unless ANTHROPIC_API_KEY is set)
@@ -292,11 +382,11 @@ bun run bench
 
 ## Roadmap
 
-- Typed RPC client (route types → client) and OpenAPI generation from route schemas
-- UI bindings (React/Vue/Svelte hooks for `streamChat`)
-- Rate limiting and token-budget middleware for AI endpoints
-- More providers (Gemini, Bedrock, Vertex), structured output helpers, embeddings
-- MCP resources, prompts, and server-initiated streams; MCP client for consuming remote tools
+- Typed RPC client (route types → client)
+- `streamObject()` with partial-JSON streaming; embeddings
+- More providers (Gemini, Bedrock, Vertex)
+- Vue/Svelte bindings for `createChat`
+- MCP resources, prompts, and server-initiated streams
 
 ## License
 

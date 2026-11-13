@@ -169,3 +169,91 @@ export function bodyLimit(maxBytes: number): Middleware {
     return next()
   }
 }
+
+// ─── Rate limit ──────────────────────────────────────────────────────────────
+
+export interface RateLimitStore {
+  /**
+   * Add `cost` to `key`'s counter in the current fixed window and return the new total and
+   * when the window resets (epoch ms). Implement this over Redis, Workers KV, Durable Objects...
+   */
+  hit(key: string, cost: number, windowMs: number): { count: number; resetAt: number } | Promise<{ count: number; resetAt: number }>
+}
+
+/** In-process fixed-window store. Fine for a single instance; use a shared store when scaling out. */
+export function memoryStore(options: { now?: () => number } = {}): RateLimitStore & { size(): number } {
+  const now = options.now ?? Date.now
+  const windows = new Map<string, { count: number; resetAt: number }>()
+  let hits = 0
+  return {
+    hit(key, cost, windowMs) {
+      const t = now()
+      // Sweep expired windows now and then so memory stays bounded by active keys.
+      if (++hits % 1000 === 0) for (const [k, w] of windows) if (w.resetAt <= t) windows.delete(k)
+      let w = windows.get(key)
+      if (!w || w.resetAt <= t) windows.set(key, (w = { count: 0, resetAt: t + windowMs }))
+      w.count += cost
+      return { count: w.count, resetAt: w.resetAt }
+    },
+    size: () => windows.size,
+  }
+}
+
+export interface RateLimitOptions {
+  /** Allowed cost per window (requests, by default). */
+  limit: number
+  windowMs: number
+  /**
+   * Who is being limited: an API key, user id, or a client IP you trust. Return null/undefined to
+   * skip limiting for this request. (There is no default: IP headers are spoofable unless your
+   * proxy sets them, so choose deliberately, e.g. `c => c.req.headers.get('cf-connecting-ip')` on Cloudflare.)
+   */
+  key: (c: Context) => string | null | undefined | Promise<string | null | undefined>
+  /** Weight of this request (default 1). E.g. charge more for expensive AI endpoints. */
+  cost?: (c: Context) => number | Promise<number>
+  store?: RateLimitStore
+  /** Send `RateLimit-*` headers on every response (default true). */
+  headers?: boolean
+  /** Key prefix so several limiters can share one store. */
+  prefix?: string
+  now?: () => number
+}
+
+/**
+ * Fixed-window rate limiting with standard `RateLimit-Limit/Remaining/Reset` headers and a
+ * 429 + `Retry-After` when exceeded.
+ *
+ * ```ts
+ * app.use('/chat', rateLimit({ limit: 20, windowMs: 60_000, key: (c) => c.req.headers.get('x-api-key') }))
+ * ```
+ */
+export function rateLimit(options: RateLimitOptions): Middleware {
+  const { limit, windowMs, key, cost, headers = true, prefix = 'rl:' } = options
+  if (!(limit > 0) || !(windowMs > 0)) throw new RangeError('rateLimit(): limit and windowMs must be > 0')
+  const now = options.now ?? Date.now
+  const store = options.store ?? memoryStore({ now })
+
+  return async (c, next) => {
+    const id = await key(c)
+    if (id === null || id === undefined || id === '') return next()
+    const weight = cost ? await cost(c) : 1
+    const { count, resetAt } = await store.hit(prefix + id, weight, windowMs)
+    const remaining = Math.max(0, limit - count)
+    const resetSec = Math.max(0, Math.ceil((resetAt - now()) / 1000))
+
+    const set = (h: (name: string, value: string) => void) => {
+      if (!headers) return
+      h('ratelimit-limit', String(limit))
+      h('ratelimit-remaining', String(remaining))
+      h('ratelimit-reset', String(resetSec))
+    }
+
+    if (count > limit) {
+      const res = c.json({ error: 'Too Many Requests' }, 429, { 'retry-after': String(resetSec) })
+      set((n, v) => res.headers.set(n, v))
+      return res
+    }
+    await next()
+    set((n, v) => c.header(n, v))
+  }
+}

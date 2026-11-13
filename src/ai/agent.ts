@@ -1,7 +1,8 @@
 import type { Context } from '../context.js'
 import { HTTPException } from '../http-exception.js'
+import type { RouteDocs } from '../mach.js'
 import { ChatInputError, type ChatInputOptions, parseChatInput } from './http.js'
-import { addUsage, MessageAccumulator, toMessages } from './model.js'
+import { addUsage, MessageAccumulator, repairToolHistory, toMessages } from './model.js'
 import type { Tool, ToolResult } from './tool.js'
 import type {
   AssistantMessage,
@@ -14,7 +15,8 @@ import type {
   Usage,
 } from './types.js'
 
-export type AgentFinishReason = FinishReason | 'max-steps'
+/** `max-steps`: hit `maxSteps`. `budget`: hit `maxTotalTokens`. */
+export type AgentFinishReason = FinishReason | 'max-steps' | 'budget'
 
 /**
  * Events streamed by an agent run. Sent over SSE as `event: <type>` + `data: <json>`.
@@ -52,11 +54,31 @@ export interface AgentOptions<Ctx = unknown> {
    * (the reason) to deny; the model receives an error result instead.
    */
   beforeToolCall?: (call: ToolCallInfo, context: Ctx) => boolean | string | void | Promise<boolean | string | void>
+  /**
+   * Token budget for one run (input + output across all steps). When reached, the run
+   * finishes with `finishReason: 'budget'` instead of calling the model again.
+   */
+  maxTotalTokens?: number
+  /** Called after each step (usage accounting, logging, persistence). Awaited. */
+  onStepFinish?: (step: StepInfo, context: Ctx) => void | Promise<void>
+  /** Called once when the run finishes (not when it throws or is aborted). Awaited. */
+  onFinish?: (result: AgentResult, context: Ctx) => void | Promise<void>
   /** HTTP options for `agent.handle(c)` / `app.agent(path, agent)`. */
   http?: ChatInputOptions & {
     /** Derive the run context from the request (e.g. the authenticated user). */
     context?: (c: Context) => Ctx | Promise<Ctx>
   }
+}
+
+export interface StepInfo {
+  step: number
+  finishReason: FinishReason
+  /** Usage of this step's model call. */
+  usage: Usage
+  /** Cumulative usage of the run so far. */
+  totalUsage: Usage
+  /** Messages this step appended (assistant, and tool results if tools ran). */
+  messages: Message[]
 }
 
 export interface AgentRunInput<Ctx = unknown> {
@@ -90,6 +112,8 @@ export function agent<Ctx = unknown>(options: AgentOptions<Ctx>): Agent<Ctx> {
 
 export class Agent<Ctx = unknown> {
   readonly options: AgentOptions<Ctx>
+  /** OpenAPI docs used by `app.agent()`. */
+  readonly docs: RouteDocs = AGENT_DOCS
   readonly #tools: Map<string, Tool<any, any>>
 
   constructor(options: AgentOptions<Ctx>) {
@@ -109,7 +133,8 @@ export class Agent<Ctx = unknown> {
   async *stream(input: string | Message[] | AgentRunInput<Ctx>): AsyncGenerator<AgentEvent, AgentResult> {
     const run: AgentRunInput<Ctx> =
       typeof input === 'string' || Array.isArray(input) ? { messages: toMessages(input) } : input
-    const { model, maxSteps = 10, maxTokens, providerOptions } = this.options
+    const { model, maxSteps = 10, maxTokens, providerOptions, maxTotalTokens } = this.options
+    if (!(maxSteps >= 1)) throw new RangeError('maxSteps must be >= 1')
     const context = run.context as Ctx
 
     // Internal controller so tools and the model stop when the run is abandoned.
@@ -121,7 +146,8 @@ export class Agent<Ctx = unknown> {
 
     const system = typeof this.options.system === 'function' ? await this.options.system(context) : this.options.system
     const tools = this.tools.map((t) => t.spec)
-    const history: Message[] = [...run.messages]
+    // Drop dangling tool calls (e.g. a run stopped mid-tool) so providers accept the history.
+    const history: Message[] = [...repairToolHistory(run.messages)]
     const produced: Message[] = []
     let usage: Usage = { inputTokens: 0, outputTokens: 0 }
     let lastText = ''
@@ -163,46 +189,58 @@ export class Agent<Ctx = unknown> {
         history.push(assistant)
         produced.push(assistant)
         yield { type: 'message', message: assistant }
+        const stepMessages: Message[] = [assistant]
 
-        if (!runTools) {
-          yield { type: 'step-finish', step, finishReason: acc.finishReason, usage: acc.usage }
-          yield { type: 'finish', text: lastText, finishReason: acc.finishReason, usage, steps: step }
-          return { text: lastText, finishReason: acc.finishReason, usage, steps: step, messages: produced }
-        }
-
-        // Run all tool calls in parallel; stream results as they complete.
-        const results: ToolResultPart[] = new Array(acc.toolCalls.length)
-        const pending = new Map<number, Promise<{ i: number; result: ToolResult; durationMs: number }>>()
-        acc.toolCalls.forEach((call, i) => {
-          const started = performance.now()
-          pending.set(
-            i,
-            this.#executeTool(call, context, signal).then((result) => ({ i, result, durationMs: performance.now() - started })),
-          )
-        })
-        while (pending.size > 0) {
-          const { i, result, durationMs } = await Promise.race(pending.values())
-          pending.delete(i)
-          const call = acc.toolCalls[i]!
-          results[i] = { type: 'tool-result', id: call.id, name: call.name, output: result.output, isError: result.isError }
-          yield {
-            type: 'tool-result',
-            id: call.id,
-            name: call.name,
-            output: result.output,
-            isError: result.isError,
-            durationMs: Math.round(durationMs),
+        if (runTools) {
+          // Run all tool calls in parallel; stream results as they complete.
+          const results: ToolResultPart[] = new Array(acc.toolCalls.length)
+          const pending = new Map<number, Promise<{ i: number; result: ToolResult; durationMs: number }>>()
+          acc.toolCalls.forEach((call, i) => {
+            const started = performance.now()
+            pending.set(
+              i,
+              this.#executeTool(call, context, signal).then((result) => ({ i, result, durationMs: performance.now() - started })),
+            )
+          })
+          while (pending.size > 0) {
+            const { i, result, durationMs } = await Promise.race(pending.values())
+            pending.delete(i)
+            const call = acc.toolCalls[i]!
+            results[i] = { type: 'tool-result', id: call.id, name: call.name, output: result.output, isError: result.isError }
+            yield {
+              type: 'tool-result',
+              id: call.id,
+              name: call.name,
+              output: result.output,
+              isError: result.isError,
+              durationMs: Math.round(durationMs),
+            }
           }
+          const toolMessage: ToolMessage = { role: 'tool', content: results }
+          history.push(toolMessage)
+          produced.push(toolMessage)
+          stepMessages.push(toolMessage)
+          yield { type: 'message', message: toolMessage }
         }
-        const toolMessage: ToolMessage = { role: 'tool', content: results }
-        history.push(toolMessage)
-        produced.push(toolMessage)
-        yield { type: 'message', message: toolMessage }
-        yield { type: 'step-finish', step, finishReason: acc.finishReason, usage: acc.usage }
-      }
 
-      yield { type: 'finish', text: lastText, finishReason: 'max-steps', usage, steps: maxSteps }
-      return { text: lastText, finishReason: 'max-steps', usage, steps: maxSteps, messages: produced }
+        yield { type: 'step-finish', step, finishReason: acc.finishReason, usage: acc.usage }
+        await this.options.onStepFinish?.(
+          { step, finishReason: acc.finishReason, usage: acc.usage, totalUsage: usage, messages: stepMessages },
+          context,
+        )
+
+        let reason: AgentFinishReason | undefined
+        if (!runTools) reason = acc.finishReason
+        else if (maxTotalTokens !== undefined && usage.inputTokens + usage.outputTokens >= maxTotalTokens) reason = 'budget'
+        else if (step === maxSteps) reason = 'max-steps'
+        if (reason !== undefined) {
+          const result: AgentResult = { text: lastText, finishReason: reason, usage, steps: step, messages: produced }
+          await this.options.onFinish?.(result, context)
+          yield { type: 'finish', text: lastText, finishReason: reason, usage, steps: step }
+          return result
+        }
+      }
+      throw new Error('unreachable: maxSteps must be >= 1')
     } finally {
       run.signal?.removeEventListener('abort', onAbort)
       if (!signal.aborted) ac.abort()
@@ -252,4 +290,20 @@ export class Agent<Ctx = unknown> {
     }
     return t.execute(call.input, { signal, toolCallId: call.id, context })
   }
+}
+
+const AGENT_DOCS: RouteDocs = {
+  summary: 'Chat with an agent',
+  description: 'Send `{ messages }` (or `{ prompt }`). Streams agent events as Server-Sent Events: `event: <type>` + `data: <json>`.',
+  tags: ['ai'],
+  requestBody: {
+    schema: {
+      type: 'object',
+      properties: {
+        messages: { type: 'array', items: { type: 'object', properties: { role: { type: 'string', enum: ['user', 'assistant', 'tool'] } }, required: ['role'] } },
+        prompt: { type: 'string' },
+      },
+    },
+  },
+  responses: { '200': { description: 'Stream of agent events', contentType: 'text/event-stream', schema: { type: 'string' } } },
 }
