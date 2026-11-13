@@ -1,0 +1,61 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": [
+      "ES2023",
+      "DOM",
+      "DOM.Iterable"
+    ],
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "noImplicitOverride": true,
+    "exactOptionalPropertyTypes": false,
+    "isolatedModules": true,
+    "verbatimModuleSyntax": true,
+    "skipLibCheck": true,
+    "declaration": true,
+    "types": [
+      "node"
+    ],
+    "paths": {
+      "machjs": [
+        "./src/index.ts"
+      ],
+      "machjs/schema": [
+        "./src/schema/index.ts"
+      ],
+      "machjs/sse": [
+        "./src/stream/sse.ts"
+      ],
+      "machjs/middleware": [
+        "./src/middleware/index.ts"
+      ],
+      "machjs/ai": [
+        "./src/ai/index.ts"
+      ],
+      "machjs/ai/anthropic": [
+        "./src/ai/providers/anthropic.ts"
+      ],
+      "machjs/ai/openai": [
+        "./src/ai/providers/openai.ts"
+      ],
+      "machjs/ai/mock": [
+        "./src/ai/providers/mock.ts"
+      ],
+      "machjs/mcp": [
+        "./src/mcp/server.ts"
+      ],
+      "machjs/client": [
+        "./src/client.ts"
+      ],
+      "machjs/node": [
+        "./src/adapters/node.ts"
+      ]
+    }
+  },
+  "include": [
+    "src"
+  ]
+}

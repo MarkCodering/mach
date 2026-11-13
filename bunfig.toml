@@ -1,0 +1,3 @@
+# Bun resolves `machjs/*` imports in examples and benchmarks to ./src via tsconfig paths.
+[test]
+root = "./test"

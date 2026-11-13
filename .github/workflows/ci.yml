@@ -1,0 +1,24 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: bun install --frozen-lockfile
+      - run: bun run typecheck
+      - run: bun test
+      - run: bun run build
+      - name: Smoke test the built package on Node
+        run: node -e "Promise.all(['machjs','machjs/ai','machjs/ai/anthropic','machjs/ai/openai','machjs/ai/mock','machjs/mcp','machjs/client','machjs/node','machjs/middleware','machjs/schema','machjs/sse'].map(m=>import(m))).then(()=>console.log('ok'))"
