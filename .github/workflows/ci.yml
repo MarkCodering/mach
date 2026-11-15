@@ -21,4 +21,4 @@ jobs:
       - run: bun test
       - run: bun run build
       - name: Smoke test the built package on Node
-        run: node -e "Promise.all(['machjs','machjs/ai','machjs/ai/anthropic','machjs/ai/openai','machjs/ai/mock','machjs/mcp','machjs/client','machjs/node','machjs/middleware','machjs/schema','machjs/sse'].map(m=>import(m))).then(()=>console.log('ok'))"
+        run: node -e "Promise.all(['machjs','machjs/ai','machjs/ai/anthropic','machjs/ai/openai','machjs/ai/mock','machjs/mcp','machjs/client','machjs/node','machjs/middleware','machjs/schema','machjs/sse','machjs/openapi','machjs/react'].map(m=>import(m))).then(()=>console.log('ok'))"

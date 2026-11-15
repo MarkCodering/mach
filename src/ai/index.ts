@@ -1,8 +1,10 @@
 export { agent, Agent } from './agent.js'
-export type { AgentEvent, AgentOptions, AgentResult, AgentRunInput, AgentFinishReason, ToolCallInfo } from './agent.js'
+export type { AgentEvent, AgentOptions, AgentResult, AgentRunInput, AgentFinishReason, ToolCallInfo, StepInfo } from './agent.js'
 export { tool, serializeToolOutput } from './tool.js'
 export type { Tool, ToolContext, ToolDefinition, ToolResult } from './tool.js'
-export { generate, MessageAccumulator, addUsage, toMessages, textOf } from './model.js'
+export { generateObject, ObjectGenerationError, extractJSON } from './object.js'
+export type { GenerateObjectOptions, GenerateObjectResult } from './object.js'
+export { generate, MessageAccumulator, addUsage, toMessages, textOf, repairToolHistory } from './model.js'
 export type { GenerateResult } from './model.js'
 export { parseChatInput, ChatInputError } from './http.js'
 export type { ChatInput, ChatInputOptions } from './http.js'
@@ -23,6 +25,7 @@ export type {
   AssistantPart,
   Model,
   ModelRequest,
+  ResponseFormat,
   ModelEvent,
   ToolSpec,
   Usage,

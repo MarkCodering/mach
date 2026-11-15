@@ -1,13 +1,15 @@
 /**
- * An AI agent with tools, streamed over SSE, with the same tools exposed over MCP.
- * Uses Claude when ANTHROPIC_API_KEY is set, otherwise a scripted mock model (offline).
+ * An AI agent with tools, streamed over SSE, with the same tools exposed over MCP,
+ * plus structured extraction, rate limiting and an OpenAPI document.
+ * Uses Claude when ANTHROPIC_API_KEY is set, otherwise scripted mock models (offline).
  */
 import { Mach, s } from 'machjs'
-import { agent, tool, type Model } from 'machjs/ai'
+import { agent, generateObject, tool, type Model } from 'machjs/ai'
 import { anthropic } from 'machjs/ai/anthropic'
 import { lastToolOutput, mockModel } from 'machjs/ai/mock'
 import { mcpServer } from 'machjs/mcp'
-import { bodyLimit, cors, logger } from 'machjs/middleware'
+import { bodyLimit, cors, logger, rateLimit } from 'machjs/middleware'
+import { openapi } from 'machjs/openapi'
 
 // ── Tools: defined once, used by the agent AND exposed over MCP ──────────────
 export const getWeather = tool({
@@ -63,12 +65,38 @@ export const assistant = agent({
   maxSteps: 8,
 })
 
+// ── Structured extraction ────────────────────────────────────────────────────
+const Contact = s.object({
+  name: s.string().describe('Full name'),
+  email: s.string({ format: 'email' }).nullable(),
+  company: s.string().nullable(),
+})
+
+const extractor: Model = process.env.ANTHROPIC_API_KEY
+  ? anthropic('claude-opus-5-5')
+  : mockModel(() => '{"name":"Ada Lovelace","email":"ada@example.com","company":"Analytical Engines"}')
+
 // ── App ──────────────────────────────────────────────────────────────────────
 export const app = new Mach()
   .use(logger(), cors(), bodyLimit(1_000_000))
-  .get('/', (c) => c.html(PAGE))
+  // 30 chat requests per minute per API key (or per anonymous bucket).
+  .use('/chat', rateLimit({ limit: 30, windowMs: 60_000, key: (c) => c.req.headers.get('x-api-key') ?? 'anonymous' }))
+  .get('/', { docs: { hidden: true } }, (c) => c.html(PAGE))
   .agent('/chat', assistant)
-  .mcp('/mcp', mcpServer({ name: 'mach-demo', version: '0.1.0', tools }))
+  .post(
+    '/extract',
+    {
+      body: s.object({ text: s.string({ min: 1, max: 20_000 }) }),
+      response: Contact,
+      docs: { summary: 'Extract a contact from free text', tags: ['ai'] },
+    },
+    async (c) => (await generateObject(extractor, { schema: Contact, prompt: c.input.body.text, signal: c.req.signal })).object,
+  )
+  .mcp('/mcp', mcpServer({ name: 'mach-demo', version: '0.2.0', tools }))
+
+app.get('/openapi.json', { docs: { hidden: true } }, () =>
+  openapi(app, { info: { title: 'Mach demo', version: '0.2.0', description: 'Agent, extraction and MCP demo' } }),
+)
 
 const PAGE = /* html */ `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">

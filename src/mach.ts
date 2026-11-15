@@ -16,11 +16,47 @@ export interface RouteSchemas {
   headers?: StandardSchemaV1
 }
 
+export interface RouteResponseDoc {
+  description?: string
+  /** A Standard Schema (Mach `s`, Zod, ...) or a plain JSON Schema object. */
+  schema?: unknown
+  /** Default `application/json`. */
+  contentType?: string
+}
+
+/** Documentation for OpenAPI generation (`machjs/openapi`). */
+export interface RouteDocs {
+  summary?: string
+  description?: string
+  tags?: string[]
+  operationId?: string
+  deprecated?: boolean
+  /** Leave this route out of the OpenAPI document. */
+  hidden?: boolean
+  /** Override the request body description (e.g. when the body is not validated by a schema). */
+  requestBody?: RouteResponseDoc
+  /** Responses by status code. Defaults to `200` with `response`'s schema. */
+  responses?: Record<string, RouteResponseDoc>
+}
+
 export interface RouteOptions<E extends Env = any> extends RouteSchemas {
   /** Route-level middleware, run after global middleware and validation. */
   middleware?: Middleware<E>[]
-  /** Free-form metadata, e.g. for docs generation. */
+  /** Schema of the success (200) JSON response. Used for docs; not enforced at runtime. */
+  response?: StandardSchemaV1
+  /** OpenAPI documentation. */
+  docs?: RouteDocs
+  /** Free-form metadata. */
   meta?: Record<string, unknown>
+}
+
+/** Public, read-only view of a registered route. */
+export interface RouteInfo {
+  method: string
+  path: string
+  schemas: RouteSchemas & { response?: StandardSchemaV1 }
+  docs: RouteDocs | undefined
+  meta: Record<string, unknown> | undefined
 }
 
 type InputOf<O> = { [K in keyof O & keyof RouteSchemas]: InferOutput<O[K]> }
@@ -34,6 +70,8 @@ interface RouteEntry {
   /** Chain incl. global middleware, cached when all middleware is global. */
   chain: AnyHandler[] | undefined
   meta: Record<string, unknown> | undefined
+  schemas: RouteInfo['schemas']
+  docs: RouteDocs | undefined
 }
 
 interface MiddlewareEntry {
@@ -49,6 +87,8 @@ export type NotFoundHandler<E extends Env = any> = (c: Context<E>) => Response |
 /** Anything that can serve requests at a path: agents, MCP servers, sub-apps. */
 export interface Mountable {
   handle(c: Context): HandlerResult | Promise<HandlerResult>
+  /** OpenAPI docs for the mounted endpoint. */
+  docs?: RouteDocs
 }
 
 const METHODS = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS', 'HEAD'] as const
@@ -124,6 +164,8 @@ export class Mach<E extends Env = {}> {
         handlers: chain,
         chain: undefined,
         meta: options?.meta,
+        schemas: pickSchemas(options),
+        docs: options?.docs,
       }
       this._router.add(entry.method, entry.path, entry)
       this._routes.push(entry)
@@ -164,7 +206,7 @@ export class Mach<E extends Env = {}> {
     const mws = app._middleware.map((m) => ({ match: m.global ? always : compilePattern(join(m.pattern)), fn: m.fn }))
     for (const r of app._routes) {
       const handlers = mws.length ? [scopedMiddleware(mws), ...r.handlers] : r.handlers
-      const entry: RouteEntry = { method: r.method, path: join(r.path), handlers, chain: undefined, meta: r.meta }
+      const entry: RouteEntry = { ...r, path: join(r.path), handlers, chain: undefined }
       this._router.add(entry.method, entry.path, entry)
       this._routes.push(entry)
     }
@@ -172,13 +214,13 @@ export class Mach<E extends Env = {}> {
   }
 
   /** Expose an agent (or anything with `handle(c)`) as a streaming POST endpoint. */
-  agent(path: string, agent: Mountable): this {
-    return this.on('POST', path, (c) => agent.handle(c))
+  agent(path: string, agent: Mountable, docs?: RouteDocs): this {
+    return this.on('POST', path, { docs: { ...agent.docs, ...docs } }, (c) => agent.handle(c))
   }
 
-  /** Expose an MCP server (from `machjs/mcp`) at a path (Streamable HTTP transport). */
+  /** Expose an MCP server (from `machjs/mcp`) at a path (Streamable HTTP transport). Hidden from OpenAPI. */
   mcp(path: string, server: Mountable): this {
-    return this.on(['GET', 'POST', 'DELETE'], path, (c) => server.handle(c))
+    return this.on(['GET', 'POST', 'DELETE'], path, { docs: { hidden: true } }, (c) => server.handle(c))
   }
 
   onError(handler: ErrorHandler<E>): this {
@@ -192,8 +234,8 @@ export class Mach<E extends Env = {}> {
   }
 
   /** All registered routes (for introspection, docs, tests). */
-  get routes(): ReadonlyArray<{ method: string; path: string; meta: Record<string, unknown> | undefined }> {
-    return this._routes.map(({ method, path, meta }) => ({ method, path, meta }))
+  get routes(): ReadonlyArray<RouteInfo> {
+    return this._routes.map(({ method, path, meta, schemas, docs }) => ({ method, path, meta, schemas, docs }))
   }
 
   /** The Web Standard entry point: `export default app` or `Bun.serve({ fetch: app.fetch })`. */
@@ -305,6 +347,17 @@ export class Mach<E extends Env = {}> {
 }
 
 // ─── Internals ───────────────────────────────────────────────────────────────
+
+function pickSchemas(o: RouteOptions | undefined): RouteInfo['schemas'] {
+  if (!o) return {}
+  const out: RouteInfo['schemas'] = {}
+  if (o.body) out.body = o.body
+  if (o.query) out.query = o.query
+  if (o.params) out.params = o.params
+  if (o.headers) out.headers = o.headers
+  if (o.response) out.response = o.response
+  return out
+}
 
 const noopNext: Next = () => Promise.resolve()
 const always = () => true

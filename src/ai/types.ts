@@ -97,6 +97,18 @@ export interface ModelRequest {
    * (e.g. `{ thinking: { type: 'adaptive', display: 'summarized' }, output_config: { effort: 'high' } }`).
    */
   providerOptions?: Record<string, unknown>
+  /**
+   * Ask for JSON matching a schema. Providers with native structured output use it
+   * (Claude `output_config.format`, OpenAI `response_format`); use `generateObject()` to validate.
+   */
+  responseFormat?: ResponseFormat
+}
+
+export interface ResponseFormat {
+  type: 'json'
+  schema: JSONSchema
+  /** Short identifier for the schema (some providers require one). */
+  name?: string
 }
 
 export interface Usage {

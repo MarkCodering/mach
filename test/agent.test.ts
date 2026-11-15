@@ -211,6 +211,48 @@ describe('agent()', () => {
   })
 })
 
+describe('agent hooks and budget', () => {
+  test('onStepFinish and onFinish receive usage and messages', async () => {
+    const steps: { step: number; total: number; msgs: number }[] = []
+    let finished: { reason: string; steps: number } | undefined
+    const model = mockModel([
+      { toolCalls: [{ name: 'get_weather', input: { city: 'Paris' } }], usage: { inputTokens: 10, outputTokens: 5 } },
+      { text: 'done', usage: { inputTokens: 20, outputTokens: 3 } },
+    ])
+    const a = agent<{ user: string }>({
+      model,
+      tools: [weather],
+      onStepFinish: (s, ctx) => {
+        expect(ctx.user).toBe('ada')
+        steps.push({ step: s.step, total: s.totalUsage.inputTokens + s.totalUsage.outputTokens, msgs: s.messages.length })
+      },
+      onFinish: (r) => {
+        finished = { reason: r.finishReason, steps: r.steps }
+      },
+    })
+    await a.run({ messages: [{ role: 'user', content: 'x' }], context: { user: 'ada' } })
+    expect(steps).toEqual([
+      { step: 1, total: 15, msgs: 2 },
+      { step: 2, total: 38, msgs: 1 },
+    ])
+    expect(finished).toEqual({ reason: 'stop', steps: 2 })
+  })
+
+  test('maxTotalTokens stops the loop before another model call', async () => {
+    const model = mockModel(() => ({ toolCalls: [{ name: 'get_weather', input: { city: 'Oslo' } }], usage: { inputTokens: 600, outputTokens: 100 } }))
+    const result = await agent({ model, tools: [weather], maxTotalTokens: 1000 }).run('loop')
+    expect(result.finishReason).toBe('budget')
+    expect(result.steps).toBe(2)
+    expect(model.calls.length).toBe(2)
+    // History stays valid: every tool call has its result.
+    expect(result.messages.at(-1)?.role).toBe('tool')
+  })
+
+  test('rejects maxSteps < 1', async () => {
+    await expect(agent({ model: mockModel(), maxSteps: 0 }).run('x')).rejects.toThrow(/maxSteps/)
+  })
+})
+
 describe('app.agent() HTTP endpoint', () => {
   const build = () => {
     const model = mockModel([{ toolCalls: [{ name: 'get_weather', input: { city: 'Paris' } }] }, 'Sunny.'])

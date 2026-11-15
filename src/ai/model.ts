@@ -129,3 +129,39 @@ export function textOf(content: Message['content']): string {
   for (const p of content) if (p.type === 'text') out += p.text
   return out
 }
+
+/**
+ * Make a conversation valid for providers: drop tool calls that never got a result (e.g. the
+ * user stopped a run mid-tool) and tool results whose call is missing. Returns the input
+ * array unchanged when nothing needs fixing.
+ */
+export function repairToolHistory(messages: Message[]): Message[] {
+  let changed = false
+  const out: Message[] = []
+  for (let i = 0; i < messages.length; i++) {
+    const m = messages[i]!
+    if (m.role === 'assistant' && Array.isArray(m.content) && m.content.some((p) => p.type === 'tool-call')) {
+      const next = messages[i + 1]
+      const answered = new Set(next?.role === 'tool' ? next.content.map((r) => r.id) : [])
+      const content = m.content.filter((p) => p.type !== 'tool-call' || answered.has(p.id))
+      if (content.length !== m.content.length) changed = true
+      if (content.length > 0) out.push(content.length === m.content.length ? m : { role: 'assistant', content })
+      else changed = true
+      continue
+    }
+    if (m.role === 'tool') {
+      const prev = out.at(-1)
+      const called = new Set(
+        prev?.role === 'assistant' && Array.isArray(prev.content)
+          ? prev.content.flatMap((p) => (p.type === 'tool-call' ? [p.id] : []))
+          : [],
+      )
+      const content = m.content.filter((r) => called.has(r.id))
+      if (content.length !== m.content.length) changed = true
+      if (content.length > 0) out.push(content.length === m.content.length ? m : { role: 'tool', content })
+      continue
+    }
+    out.push(m)
+  }
+  return changed ? out : messages
+}

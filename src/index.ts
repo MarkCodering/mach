@@ -1,5 +1,5 @@
 export { Mach } from './mach.js'
-export type { RouteOptions, RouteSchemas, ErrorHandler, NotFoundHandler, Mountable } from './mach.js'
+export type { RouteOptions, RouteSchemas, RouteDocs, RouteResponseDoc, RouteInfo, ErrorHandler, NotFoundHandler, Mountable } from './mach.js'
 export { toResponse } from './mach.js'
 export { Context } from './context.js'
 export type { Env, Input, Handler, Middleware, Next, HandlerResult, ParamsOf, ExecutionContext, StreamWriter } from './context.js'

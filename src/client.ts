@@ -81,3 +81,146 @@ export async function chat(url: string | URL, options: StreamChatOptions & { onT
 }
 
 export type { AgentEvent, Message }
+
+// ─── Chat store (framework-agnostic) ────────────────────────────────────────
+
+export interface ActiveTool {
+  id: string
+  name: string
+  input: unknown
+  status: 'running' | 'done' | 'error'
+  output?: unknown
+}
+
+export interface ChatState {
+  /** The conversation: your messages plus everything the server produced. */
+  messages: Message[]
+  status: 'idle' | 'streaming' | 'error'
+  error: Error | undefined
+  /** Text of the assistant turn currently streaming (not yet in `messages`). */
+  draft: string
+  /** Reasoning of the assistant turn currently streaming. */
+  draftReasoning: string
+  /** Tool calls of the current run, with live status. */
+  tools: ActiveTool[]
+}
+
+export interface ChatOptions {
+  /** Agent endpoint, e.g. '/chat'. */
+  api: string | URL
+  initialMessages?: Message[]
+  headers?: Record<string, string> | (() => Record<string, string>)
+  fetch?: typeof fetch
+  onEvent?: (event: AgentEvent) => void
+  onFinish?: (event: Extract<AgentEvent, { type: 'finish' }>, messages: Message[]) => void
+  onError?: (error: Error) => void
+}
+
+export interface ChatStore {
+  getState(): ChatState
+  /** Subscribe to state changes; returns an unsubscribe function. */
+  subscribe(listener: () => void): () => void
+  /** Send a user message and stream the reply. Resolves when the run ends. */
+  send(content: string | import('./ai/types.js').UserPart[]): Promise<void>
+  /** Abort the in-flight request. */
+  stop(): void
+  /** Replace the conversation (e.g. load from storage). Stops any run. */
+  setMessages(messages: Message[]): void
+}
+
+/**
+ * State container for chat UIs. Immutable snapshots + subscribe, so it plugs into React
+ * (`useSyncExternalStore`, see `machjs/react`), Vue, Svelte, Solid or vanilla JS.
+ */
+export function createChat(options: ChatOptions): ChatStore {
+  let state: ChatState = {
+    messages: options.initialMessages ?? [],
+    status: 'idle',
+    error: undefined,
+    draft: '',
+    draftReasoning: '',
+    tools: [],
+  }
+  const listeners = new Set<() => void>()
+  let controller: AbortController | undefined
+
+  const set = (patch: Partial<ChatState>) => {
+    state = { ...state, ...patch }
+    for (const l of listeners) l()
+  }
+
+  const apply = (ev: AgentEvent) => {
+    switch (ev.type) {
+      case 'text-delta':
+        set({ draft: state.draft + ev.text })
+        break
+      case 'reasoning-delta':
+        set({ draftReasoning: state.draftReasoning + ev.text })
+        break
+      case 'tool-call':
+        set({ tools: [...state.tools, { id: ev.id, name: ev.name, input: ev.input, status: 'running' }] })
+        break
+      case 'tool-result':
+        set({
+          tools: state.tools.map((t) =>
+            t.id === ev.id ? { ...t, status: ev.isError ? 'error' : 'done', output: ev.output } : t,
+          ),
+        })
+        break
+      case 'message':
+        set({
+          messages: [...state.messages, ev.message],
+          ...(ev.message.role === 'assistant' && { draft: '', draftReasoning: '' }),
+        })
+        break
+    }
+  }
+
+  return {
+    getState: () => state,
+    subscribe(listener) {
+      listeners.add(listener)
+      return () => listeners.delete(listener)
+    },
+    async send(content) {
+      controller?.abort()
+      const ac = (controller = new AbortController())
+      const messages: Message[] = [...state.messages, { role: 'user', content }]
+      set({ messages, status: 'streaming', error: undefined, draft: '', draftReasoning: '', tools: [] })
+      try {
+        const headers = typeof options.headers === 'function' ? options.headers() : options.headers
+        for await (const ev of streamChat(options.api, {
+          messages,
+          signal: ac.signal,
+          ...(headers && { headers }),
+          ...(options.fetch && { fetch: options.fetch }),
+        })) {
+          if (ac !== controller) return // superseded by a newer send()/setMessages()
+          apply(ev)
+          options.onEvent?.(ev)
+          if (ev.type === 'finish') options.onFinish?.(ev, state.messages)
+        }
+        if (ac === controller) set({ status: 'idle', draft: '', draftReasoning: '' })
+      } catch (err) {
+        if (ac !== controller) return
+        if (ac.signal.aborted) {
+          set({ status: 'idle' })
+          return
+        }
+        const error = err instanceof Error ? err : new Error(String(err))
+        set({ status: 'error', error })
+        options.onError?.(error)
+      } finally {
+        if (ac === controller) controller = undefined
+      }
+    },
+    stop() {
+      controller?.abort()
+    },
+    setMessages(messages) {
+      controller?.abort()
+      controller = undefined
+      set({ messages, status: 'idle', error: undefined, draft: '', draftReasoning: '', tools: [] })
+    },
+  }
+}
